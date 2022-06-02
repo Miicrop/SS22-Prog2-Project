@@ -35,6 +35,7 @@
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 
+
 //######################################################################################################################
 //Instanziierung
 //######################################################################################################################
@@ -43,6 +44,7 @@ Servo servo;
 HeartBeat HB;
 WiFiClient client;
 ESP8266WebServer server(80);
+String serverIP = "";
 
 //RFID Pins
 #define SS_PIN 15
@@ -54,16 +56,23 @@ const char *SSID = "Vodafone-A845";
 const char *PASS = "FHRrCFtcCARgPPLR";
 
 //Localhost
-String HOSTsendData = "http://192.168.0.194/Admin/sendData.php";
-String HOSTsendHeartbeat = "http://192.168.0.194/Admin/testframe/heartbeat.php";
+//String HOSTsendData = "http://192.168.0.194/Admin/sendData.php";
+//String HOSTsendHeartbeat = "http://192.168.0.194/Admin/testframe/heartbeat.php";
+//String HOSTscanTag = "http://192.168.0.194/Admin/admin.php";
+
+//Localhost mit variabler IP
+String HOSTsendData = "http://" + serverIP + "/Admin/sendData.php";
+String HOSTsendHeartbeat = "http://" + serverIP + "/Admin/testframe/heartbeat.php";
+String HOSTscanTag = "http://" + serverIP + "/Admin/admin.php";
+
 
 //######################################################################################################################
 //Klasse - LEDs
 //######################################################################################################################
+
 class LED {
   public:
     int pin;
-    int state = 0;
 
     LED(int pinI) {
       pin = pinI;
@@ -76,28 +85,7 @@ class LED {
     }
     void ledOff() {
       digitalWrite(pin, LOW);
-    }
-
-    void ledBlink(int answServer) {
-      int i = 0;
-        while (i < answServer) {
-          long blinkTime = millis();
-          digitalWrite(pin, (blinkTime / 1000) % 2);
-          i++;
-//          if (state == 0) {
-//            digitalWrite(pin, HIGH);
-//            state = 1;
-//            delay(500);
-//            i++;
-//          }
-//          else {
-//            digitalWrite(pin, LOW);
-//            state = 0;
-//            delay(500);
-//        }
-      }
-    }
-    
+    }    
 };
 
 LED *ledRot = new LED(0);
@@ -110,12 +98,12 @@ LED *ledGruen = new LED(4);
 
 int httpCode;
 String payload;
-String zugang;
-String password;
+boolean scanState = false; //true wenn Funktion um Tag auszulesen und direkt in Datenbank zu speichern genutzt wurde
 
 long currentTime = millis();
 long resetTime = millis();
 
+//Sendet ausgelesenen Tag an Webserver und prüft ob ein Zugang erteilt wird
 String sendData(int tag) {
   HTTPClient http;
   String Link = HOSTsendData + "?tag=" + (String)tag;
@@ -127,9 +115,22 @@ String sendData(int tag) {
   return payload;
 }
 
+//Sendet ausgelesenen Tag an Webserver und speichert ihn in die Datenbank
+String sendTag(int tag) {
+  HTTPClient http;
+  String Link = HOSTscanTag + "?tag=" + (String)tag;
+  http.begin(client, Link);
+  httpCode = http.GET();
+  payload = http.getString();
+  Serial.println("Tag in Datenbank gespeichert");
+  http.end();
+  return payload;
+}
+
 //Servo ansteuern und Schloss öffnen
 void open() {
   servo.write(70);
+  ledGruen->ledOn();
   currentTime = millis();
   server.send(200, "text/html", "0");
 }
@@ -142,8 +143,7 @@ void close() {
 //Ping um Mikrocontroller zu finden
 void ping() {
   setCrossOrigin();
-  String data = "77"; 
-  server.send(200, "text/html", data);
+  server.send(200, "text/html", "77");
 }
 
 //notwendig um gefunden zu werden
@@ -154,7 +154,7 @@ void setCrossOrigin(){
     server.sendHeader("Access-Control-Allow-Headers", "*");
 }
 
-
+//Sendet alle 10 Sekunden einen Heartbeat zur Ausgabe an die Website
 long heartbeatTime;
 int heartbeatCounter = 0;
 
@@ -171,6 +171,70 @@ void sendHeartbeat(){
     heartbeatTime = millis();
   }
 }
+
+//Funktion wird via Website aufgerufen um Tags auszulesen und direkt in die Datenbank zu speichern
+void scanTag() {
+  scanState = true;
+  ledGruen->ledOn();
+  ledRot->ledOn();
+  while (scanState) {
+    if ((millis() - resetTime) > 600) {
+    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+        //neue Variable für Codenummer des Chips
+        long code = 0;
+        //Originalcode in lesbarere Zahl ändern
+        for (byte i = 0; i < rfid.uid.size; i++) {
+          code = ((code + rfid.uid.uidByte[i]) * 10);
+        }
+  
+        //Ausgabe des Kartencodes
+        Serial.print("Die Kartennummer lautet: ");
+        Serial.println(code);
+        ledGruen->ledOff();
+        ledRot->ledOff();
+        sendTag(code);
+        server.send(200, "text/html", "0");
+        scanState = false;
+        resetTime = millis();
+    }
+    }
+  }
+}
+
+//Funktion um die IP Adresse des Webserver herauszufinden
+String serverPath = "/Admin";
+
+String findServer() {
+String ip;
+  
+  String ipBase = WiFi.localIP().toString();
+  int end = ipBase.lastIndexOf(".");
+  ipBase = ipBase.substring(0, end+1);
+  Serial.println(ipBase);
+  
+  for (int i = 190; i < 255; i++) {
+    ip = ipBase + (String) i;
+    Serial.println("check at: " + ip + serverPath + "/0118999881999119725.txt");
+    if (serverRequest("http://" + ip + serverPath + "/0118999881999119725.txt") == "3") {
+      Serial.println("FOUND!! -> IP: " + ip);
+      serverIP = ip;
+      Serial.println("neue ServerIP: " + ip);
+      return ip;
+    }
+  }
+  return "Keine IP gefunden"; //Default
+}
+
+String serverRequest (String adresse) {
+  HTTPClient http;
+  http.begin(client, adresse);
+  int httpCode = http.GET();
+  String response = http.getString();
+  http.end();
+  Serial.println(response);
+  return response;
+}
+
 
 //######################################################################################################################
 //Setup
@@ -205,12 +269,21 @@ void setup() {
     Serial.println(WiFi.localIP());
   }
 
+  //IP des Servers automatisch suchen
+  findServer();
+  //Localhost Adressen neu belegen
+  HOSTsendData = "http://" + serverIP + "/Admin/sendData.php";
+  HOSTsendHeartbeat = "http://" + serverIP + "/Admin/testframe/heartbeat.php";
+  HOSTscanTag = "http://" + serverIP + "/Admin/admin.php";
+
   //Mikrocontroller als Webserver Setup
   server.begin();
   server.on("/open", open);
   server.on("/ping", ping);
+  server.on("/scan", scanTag);
 
 }
+
 
 //######################################################################################################################
 //Loop
@@ -233,40 +306,40 @@ void loop() {
   server.handleClient();
 
   //---------------------RFID Loop---------------------
-  if ((millis() - resetTime) > 600) {
-
-    //Wenn Chip in Reichweite ist
-    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-
-      //neue Variable für Codenummer des Chips
-      long code = 0;
-      //Originalcode in lesbarere Zahl ändern
-      for (byte i = 0; i < rfid.uid.size; i++) {
-        code = ((code + rfid.uid.uidByte[i]) * 10);
+  if (!scanState) {
+    if ((millis() - resetTime) > 600) {
+  
+        //Wenn Chip in Reichweite ist
+        if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    
+          //neue Variable für Codenummer des Chips
+          long code = 0;
+          //Originalcode in lesbarere Zahl ändern
+          for (byte i = 0; i < rfid.uid.size; i++) {
+            code = ((code + rfid.uid.uidByte[i]) * 10);
+          }
+    
+          //Ausgabe des Kartencodes
+          Serial.print("Die Kartennummer lautet: ");
+          Serial.println(code);
+          
+          String serverResponse = sendData(code);
+          Serial.println("serverResponse: " + serverResponse);
+          int blinkCount = serverResponse.toInt();
+        
+          if (payload != "1") {
+            Serial.println("Zugang verweigert");
+            ledRot->ledOn();
+            currentTime = millis();
+          }
+          else {
+            Serial.println("Zugang gewährt");
+            open();
+            currentTime = millis();
+          }
+          
+        resetTime = millis();
       }
-
-      //Ausgabe des Kartencodes
-      Serial.print("Die Kartennummer lautet: ");
-      Serial.println(code);
-      
-      String serverResponse = sendData(code);
-      Serial.println("serverResponse: " + serverResponse);
-      int blinkCount = serverResponse.toInt();
-     
-      if (payload != "1") {
-        Serial.println("Zugang verweigert");
-        //ledRot->ledOn();
-        ledRot->ledBlink(blinkCount);
-        currentTime = millis();
-      }
-      else {
-        Serial.println("Zugang gewährt");
-        open();
-        ledGruen->ledOn();
-        currentTime = millis();
-      }
-
-      resetTime = millis();
     }
   }
 }
