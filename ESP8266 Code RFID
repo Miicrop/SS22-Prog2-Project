@@ -171,6 +171,7 @@ void setCrossOrigin(){
 
 //Sendet alle 10 Sekunden einen Heartbeat zur Ausgabe an die Website
 long heartbeatTime;
+int heartbeatCounter = 0;
 
 void sendHeartbeat(){
   if((millis() - heartbeatTime) > 10000) {
